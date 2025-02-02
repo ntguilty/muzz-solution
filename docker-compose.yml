@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  database:
+    image: postgres:13
+    environment:
+      POSTGRES_DB: decisiondb
+      POSTGRES_USER: dbuser
+      POSTGRES_PASSWORD: dbpass
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U dbuser -d decisiondb" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  migrate:
+    image: migrate/migrate
+    volumes:
+      - ./migrations:/migrations
+    command: [ "-path", "/migrations", "-database",  "postgres://dbuser:dbpass@database:5432/decisiondb?sslmode=disable", "up" ]
+    depends_on:
+      database:
+        condition: service_healthy
+
+  api:
+    image: golang:1.23-alpine
+    working_dir: /app
+    command: [ "go", "run", "cmd/api/main.go" ]
+    volumes:
+      - ".:/app"
+    env_file:
+      - .env.local
+    depends_on:
+      database:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "8080:8080"

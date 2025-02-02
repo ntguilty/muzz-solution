@@ -2,35 +2,42 @@ package grpc
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health"
 	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
+	"muzz-homework/internal/explore/domain"
 	pb "muzz-homework/pkg/proto"
 	"net"
 )
 
 type decisionProvider interface {
-	ListLikedYou(ctx context.Context, recipientID string, paginationToken *string) ([]*pb.ListLikedYouResponse_Liker, string, error)
-	ListNewLikedYou(ctx context.Context, recipientID string, paginationToken *string) ([]*pb.ListLikedYouResponse_Liker, string, error)
+	ListLikedYou(ctx context.Context, recipientID string, encodedToken string) ([]domain.LikerInfo, string, error)
+	ListNewLikedYou(ctx context.Context, recipientID string, encodedToken string) ([]domain.LikerInfo, string, error)
 	CountLikedYou(ctx context.Context, recipientID string) (uint64, error)
-	PutDecision(ctx context.Context, actorID string, recipientID string, liked bool) (bool, error)
+}
+
+type decisionCreator interface {
+	SaveDecision(ctx context.Context, actorID string, recipientID string, liked bool) (bool, error)
 }
 
 type grpcServer struct {
 	pb.UnimplementedExploreServiceServer
-	engine  *grpc.Server
-	port    string
-	service decisionProvider
+	engine   *grpc.Server
+	port     string
+	provider decisionProvider
+	creator  decisionCreator
 }
 
-func NewGRPCServer(port string, service decisionProvider) *grpcServer {
+func NewGRPCServer(port string, provider decisionProvider, creator decisionCreator) *grpcServer {
 	return &grpcServer{
-		port:    port,
-		engine:  grpc.NewServer(),
-		service: service,
+		port:     port,
+		engine:   grpc.NewServer(),
+		provider: provider,
+		creator:  creator,
 	}
 }
 
@@ -55,14 +62,28 @@ func (s *grpcServer) ListLikedYou(ctx context.Context, req *pb.ListLikedYouReque
 		return nil, status.Error(codes.InvalidArgument, "recipient user ID is required")
 	}
 
-	users, nextToken, err := s.service.ListLikedYou(ctx, req.RecipientUserId, req.PaginationToken)
+	if req.PaginationToken != nil && !isValidBase64(*req.PaginationToken) {
+		return nil, status.Error(codes.InvalidArgument, "invalid pagination token format")
+	}
+
+	likers, nextToken, err := s.provider.ListLikedYou(ctx, req.RecipientUserId, req.GetPaginationToken())
 	if err != nil {
-		return nil, status.Error(codes.Internal, fmt.Sprintf("failed to list users: %v", err))
+		return nil, status.Error(codes.Internal, fmt.Sprintf("failed to list likes: %v", err))
+	}
+
+	protoLikers := make([]*pb.ListLikedYouResponse_Liker, len(likers))
+	for i, liker := range likers {
+		protoLikers[i] = toLikerProto(liker)
+	}
+
+	var nextTokenPtr *string
+	if nextToken != "" {
+		nextTokenPtr = &nextToken
 	}
 
 	return &pb.ListLikedYouResponse{
-		Likers:              users,
-		NextPaginationToken: &nextToken,
+		Likers:              protoLikers,
+		NextPaginationToken: nextTokenPtr,
 	}, nil
 }
 
@@ -71,14 +92,29 @@ func (s *grpcServer) ListNewLikedYou(ctx context.Context, req *pb.ListLikedYouRe
 		return nil, status.Error(codes.InvalidArgument, "recipient user ID is required")
 	}
 
-	likers, nextToken, err := s.service.ListNewLikedYou(ctx, req.RecipientUserId, req.PaginationToken)
+	if req.PaginationToken != nil && !isValidBase64(*req.PaginationToken) {
+		return nil, status.Error(codes.InvalidArgument, "invalid pagination token format")
+	}
+
+	likers, nextToken, err := s.provider.ListNewLikedYou(ctx, req.RecipientUserId, req.GetPaginationToken())
 	if err != nil {
 		return nil, status.Error(codes.Internal, fmt.Sprintf("failed to list new likes: %v", err))
+
+	}
+
+	protoLikers := make([]*pb.ListLikedYouResponse_Liker, len(likers))
+	for i, liker := range likers {
+		protoLikers[i] = toLikerProto(liker)
+	}
+
+	var nextTokenPtr *string
+	if nextToken != "" {
+		nextTokenPtr = &nextToken
 	}
 
 	return &pb.ListLikedYouResponse{
-		Likers:              likers,
-		NextPaginationToken: &nextToken,
+		Likers:              protoLikers,
+		NextPaginationToken: nextTokenPtr,
 	}, nil
 }
 
@@ -87,9 +123,9 @@ func (s *grpcServer) CountLikedYou(ctx context.Context, req *pb.CountLikedYouReq
 		return nil, status.Error(codes.InvalidArgument, "recipient user ID is required")
 	}
 
-	count, err := s.service.CountLikedYou(ctx, req.RecipientUserId)
+	count, err := s.provider.CountLikedYou(ctx, req.RecipientUserId)
 	if err != nil {
-		return nil, status.Error(codes.Internal, fmt.Sprintf("failed to count likes: %v", err))
+		return nil, status.Error(codes.Internal, fmt.Sprint("failed to count likes"))
 	}
 
 	return &pb.CountLikedYouResponse{
@@ -102,7 +138,11 @@ func (s *grpcServer) PutDecision(ctx context.Context, req *pb.PutDecisionRequest
 		return nil, status.Error(codes.InvalidArgument, "both actor and recipient user IDs are required")
 	}
 
-	mutualLikes, err := s.service.PutDecision(ctx, req.ActorUserId, req.RecipientUserId, req.LikedRecipient)
+	if req.ActorUserId == req.RecipientUserId {
+		return nil, status.Error(codes.InvalidArgument, "both actor and recipient user IDs are the same")
+	}
+
+	mutualLikes, err := s.creator.SaveDecision(ctx, req.ActorUserId, req.RecipientUserId, req.LikedRecipient)
 	if err != nil {
 		return nil, status.Error(codes.Internal, fmt.Sprintf("failed to put decision: %v", err))
 	}
@@ -118,4 +158,16 @@ func (s *grpcServer) GracefulStop() {
 
 func (s *grpcServer) Stop() {
 	s.engine.Stop()
+}
+
+func isValidBase64(s string) bool {
+	_, err := base64.StdEncoding.DecodeString(s)
+	return err == nil
+}
+
+func toLikerProto(info domain.LikerInfo) *pb.ListLikedYouResponse_Liker {
+	return &pb.ListLikedYouResponse_Liker{
+		ActorId:       info.ActorID,
+		UnixTimestamp: info.Timestamp,
+	}
 }
