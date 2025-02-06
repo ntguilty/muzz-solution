@@ -40,5 +40,5 @@ message PutDecisionRequest {
 }
 
 message PutDecisionResponse {
-  bool mutual_likes = 1; // True if both users like each other
+  bool mutual_likes = 1;
 }

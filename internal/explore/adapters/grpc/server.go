@@ -24,20 +24,26 @@ type decisionCreator interface {
 	SaveDecision(ctx context.Context, actorID string, recipientID string, liked bool) (bool, error)
 }
 
+type logger interface {
+	Error(format string, args ...any)
+}
+
 type grpcServer struct {
 	pb.UnimplementedExploreServiceServer
 	engine   *grpc.Server
 	port     string
 	provider decisionProvider
 	creator  decisionCreator
+	logger   logger
 }
 
-func NewGRPCServer(port string, provider decisionProvider, creator decisionCreator) *grpcServer {
+func NewGRPCServer(port string, provider decisionProvider, creator decisionCreator, logger logger) *grpcServer {
 	return &grpcServer{
 		port:     port,
 		engine:   grpc.NewServer(),
 		provider: provider,
 		creator:  creator,
+		logger:   logger,
 	}
 }
 
@@ -68,7 +74,8 @@ func (s *grpcServer) ListLikedYou(ctx context.Context, req *pb.ListLikedYouReque
 
 	likers, nextToken, err := s.provider.ListLikedYou(ctx, req.RecipientUserId, req.GetPaginationToken())
 	if err != nil {
-		return nil, status.Error(codes.Internal, fmt.Sprintf("failed to list likes: %v", err))
+		s.logger.Error("ListLikedYou failed", err)
+		return nil, status.Error(codes.Internal, "internal server error")
 	}
 
 	protoLikers := make([]*pb.ListLikedYouResponse_Liker, len(likers))
@@ -98,8 +105,8 @@ func (s *grpcServer) ListNewLikedYou(ctx context.Context, req *pb.ListLikedYouRe
 
 	likers, nextToken, err := s.provider.ListNewLikedYou(ctx, req.RecipientUserId, req.GetPaginationToken())
 	if err != nil {
-		return nil, status.Error(codes.Internal, fmt.Sprintf("failed to list new likes: %v", err))
-
+		s.logger.Error("ListNewLikedYou failed", err)
+		return nil, status.Error(codes.Internal, "internal server error")
 	}
 
 	protoLikers := make([]*pb.ListLikedYouResponse_Liker, len(likers))
@@ -125,7 +132,8 @@ func (s *grpcServer) CountLikedYou(ctx context.Context, req *pb.CountLikedYouReq
 
 	count, err := s.provider.CountLikedYou(ctx, req.RecipientUserId)
 	if err != nil {
-		return nil, status.Error(codes.Internal, fmt.Sprint("failed to count likes"))
+		s.logger.Error("CountLikedYou failed", err)
+		return nil, status.Error(codes.Internal, "internal server error")
 	}
 
 	return &pb.CountLikedYouResponse{
@@ -144,7 +152,8 @@ func (s *grpcServer) PutDecision(ctx context.Context, req *pb.PutDecisionRequest
 
 	mutualLikes, err := s.creator.SaveDecision(ctx, req.ActorUserId, req.RecipientUserId, req.LikedRecipient)
 	if err != nil {
-		return nil, status.Error(codes.Internal, fmt.Sprintf("failed to put decision: %v", err))
+		s.logger.Error("PutDecision failed", err)
+		return nil, status.Error(codes.Internal, "internal server error")
 	}
 
 	return &pb.PutDecisionResponse{

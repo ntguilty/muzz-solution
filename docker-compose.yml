@@ -14,6 +14,16 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+      
+  redis:
+    image: redis:7.2-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   migrate:
     image: migrate/migrate
@@ -35,7 +45,9 @@ services:
     depends_on:
       database:
         condition: service_healthy
+      redis:
+        condition: service_healthy
       migrate:
         condition: service_completed_successfully
     ports:
-      - "8080:8080"
+      - "8000:8000"

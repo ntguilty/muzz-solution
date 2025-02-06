@@ -9,6 +9,8 @@ import (
 	"time"
 )
 
+const paginationLimit = 20
+
 type decisionRepository struct {
 	db *sql.DB
 	sq sq.StatementBuilderType
@@ -24,30 +26,22 @@ func NewDecisionRepository(db *sql.DB) *decisionRepository {
 func (r *decisionRepository) InsertDecision(ctx context.Context, actorID string, recipientID string, liked bool) (bool, error) {
 	timestamp := uint64(time.Now().Unix())
 
-	var mutualLike bool
-	err := r.sq.Insert("user_decisions").
+	_, err := r.sq.Insert("user_decisions").
 		Columns("actor_user_id", "recipient_user_id", "liked_recipient", "decision_timestamp").
 		Values(actorID, recipientID, liked, timestamp).
 		Suffix(`
            ON CONFLICT (actor_user_id, recipient_user_id) 
            DO UPDATE SET 
                liked_recipient = EXCLUDED.liked_recipient,
-               decision_timestamp = EXCLUDED.decision_timestamp
-           RETURNING EXISTS (
-               SELECT 1 FROM user_decisions 
-               WHERE actor_user_id = $1 
-               AND recipient_user_id = $2 
-               AND liked_recipient = true
-           )`, recipientID, actorID).
+               decision_timestamp = EXCLUDED.decision_timestamp`).
 		RunWith(r.db).
-		QueryRowContext(ctx).
-		Scan(&mutualLike)
+		ExecContext(ctx)
 
 	if err != nil {
 		return false, fmt.Errorf("inserting decision: %w", err)
 	}
 
-	return mutualLike, nil
+	return true, nil
 }
 
 func (r *decisionRepository) GetLikers(ctx context.Context, recipientID string, timestamp *uint64, excludeMutual bool) ([]domain.LikerInfo, *uint64, error) {
@@ -56,11 +50,10 @@ func (r *decisionRepository) GetLikers(ctx context.Context, recipientID string, 
 		Where(sq.Eq{"recipient_user_id": recipientID, "liked_recipient": true})
 
 	if excludeMutual {
-		query = query.LeftJoin(
-			"user_decisions ud2 ON user_decisions.actor_user_id = ud2.recipient_user_id " +
-				"AND user_decisions.recipient_user_id = ud2.actor_user_id " +
-				"AND ud2.liked_recipient = true").
-			Where("ud2.actor_user_id IS NULL")
+		query = query.Where("NOT EXISTS (SELECT 1 FROM user_decisions ud2 WHERE "+
+			"ud2.actor_user_id = ? AND "+
+			"ud2.recipient_user_id = user_decisions.actor_user_id AND "+
+			"ud2.liked_recipient = true)", recipientID)
 	}
 
 	if timestamp != nil {
@@ -68,7 +61,7 @@ func (r *decisionRepository) GetLikers(ctx context.Context, recipientID string, 
 	}
 
 	query = query.OrderBy("decision_timestamp DESC").
-		Limit(20)
+		Limit(paginationLimit + 1)
 
 	rows, err := query.RunWith(r.db).QueryContext(ctx)
 	if err != nil {
@@ -78,18 +71,29 @@ func (r *decisionRepository) GetLikers(ctx context.Context, recipientID string, 
 
 	var likers []domain.LikerInfo
 	var lastTimestamp uint64
+	var hasMore bool
 
 	for rows.Next() {
 		var liker domain.LikerInfo
 		if err := rows.Scan(&liker.ActorID, &liker.Timestamp); err != nil {
 			return nil, nil, fmt.Errorf("scanning liker: %w", err)
 		}
-		likers = append(likers, liker)
-		lastTimestamp = liker.Timestamp
+
+		if len(likers) < paginationLimit {
+			likers = append(likers, liker)
+			lastTimestamp = liker.Timestamp
+		} else {
+			hasMore = true
+			break
+		}
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("iterating over likers: %w", err)
 	}
 
 	var nextTimestamp *uint64
-	if len(likers) == 20 {
+	if hasMore {
 		nextTimestamp = &lastTimestamp
 	}
 
