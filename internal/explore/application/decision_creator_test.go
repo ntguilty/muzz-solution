@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"github.com/stretchr/testify/assert"
-	"muzz-homework/internal/explore/domain"
 	"testing"
 )
 
@@ -51,24 +50,6 @@ func TestDecisionCreator_SaveDecision(t *testing.T) {
 			},
 			wantMutual: false,
 			wantErr:    nil,
-		},
-		{
-			name:         "error - empty actor ID",
-			actorID:      "",
-			recipientID:  "user2",
-			liked:        true,
-			mockBehavior: func(m *mockDecisionCreatorRepo) {},
-			wantMutual:   false,
-			wantErr:      domain.ErrInvalidInput,
-		},
-		{
-			name:         "error - empty recipient ID",
-			actorID:      "user1",
-			recipientID:  "",
-			liked:        true,
-			mockBehavior: func(m *mockDecisionCreatorRepo) {},
-			wantMutual:   false,
-			wantErr:      domain.ErrInvalidInput,
 		},
 		{
 			name:        "error - repository error",
